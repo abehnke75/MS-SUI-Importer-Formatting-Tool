@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MS SUI Rate Exchange Formatter</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: #fff; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/javascript">
+    const { useState, useCallback } = React;
+
+    const TABS = { PASTE: 0, SUI_RATES: 1, EIN_CORRECTIONS: 2 };
+
+    function parseResponseLine(line) {
+      if (!line || line.trim().length === 0) return null;
+      const ean = line.substring(0, 10).trim();
+      const fein = line.substring(10, 19).trim();
+      const rateRaw = line.substring(22, 25).trim();
+      const midSection = line.substring(22, 72).trim();
+
+      let rate = 0;
+      if (rateRaw && midSection.length > 0) {
+        const parsed = parseInt(rateRaw, 10);
+        if (!isNaN(parsed)) {
+          rate = parsed / 100;
+        }
+      }
+
+      return { ean, fein, rate, raw: line };
+    }
+
+    function formatFein(fein) {
+      return fein.padStart(9, "0");
+    }
+
+    function MSSUIFormatter() {
+      const [rawInput, setRawInput] = useState("");
+      const [activeTab, setActiveTab] = useState(TABS.PASTE);
+      const [suiRates, setSuiRates] = useState([]);
+      const [einCorrections, setEinCorrections] = useState([]);
+      const [stats, setStats] = useState(null);
+      const [filterZero, setFilterZero] = useState(true);
+      const [copied, setCopied] = useState("");
+
+      const processData = useCallback(() => {
+        const lines = rawInput.split("\n").filter(l => l.trim().length > 0);
+        const parsed = lines.map(parseResponseLine).filter(Boolean);
+
+        const withRate = parsed.filter(r => r.rate > 0);
+        const withoutRate = parsed.filter(r => r.rate === 0);
+
+        const rates = withRate.map(r => ({
+          fein: formatFein(r.fein),
+          rate: r.rate,
+        }));
+
+        const dupFeinTracker = new Map();
+
+        parsed.forEach(r => {
+          const ean = r.ean.padStart(10, "0");
+          if (ean === "0000000000") return;
+
+          const fein = formatFein(r.fein);
+          if (!dupFeinTracker.has(fein)) {
+            dupFeinTracker.set(fein, []);
+          }
+          dupFeinTracker.get(fein).push(ean);
+        });
+
+        const corrections = [];
+        const removedDups = [];
+        dupFeinTracker.forEach((eans, fein) => {
+          const uniqueEans = [...new Set(eans)];
+          if (uniqueEans.length === 1) {
+            corrections.push({
+              fein,
+              einKey: "MS - MDES EAN",
+              ein: uniqueEans[0],
+            });
+          } else {
+            removedDups.push({ fein, count: uniqueEans.length });
+          }
+        });
+
+        setSuiRates(rates);
+        setEinCorrections(corrections);
+        setStats({
+          totalLines: parsed.length,
+          withRate: withRate.length,
+          withoutRate: withoutRate.length,
+          einCorrectionCount: corrections.length,
+          removedDups: removedDups.length,
+          dupDetails: removedDups,
+        });
+        setActiveTab(TABS.SUI_RATES);
+      }, [rawInput]);
+
+      const generateCSV = (type) => {
+        if (type === "sui") {
+          const displayRates = filterZero ? suiRates.filter(r => r.rate > 0) : suiRates;
+          const header = "FEIN,SUI rate\n";
+          return header + displayRates.map(r => `${r.fein},${r.rate}`).join("\n");
+        } else {
+          const header = "FEIN,EIN Key,EIN\n";
+          return header + einCorrections.map(r => `${r.fein},${r.einKey},${r.ein}`).join("\n");
+        }
+      };
+
+      const copyToClipboard = async (type) => {
+        const csv = generateCSV(type);
+        try {
+          await navigator.clipboard.writeText(csv);
+          setCopied(type);
+          setTimeout(() => setCopied(""), 2000);
+        } catch {
+          const ta = document.createElement("textarea");
+          ta.value = csv;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          setCopied(type);
+          setTimeout(() => setCopied(""), 2000);
+        }
+      };
+
+      const downloadCSV = (type) => {
+        const csv = generateCSV(type);
+        const blob = new Blob([csv], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = type === "sui" ? "sui_rate_import.csv" : "ein_corrections_import.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const displayRates = filterZero ? suiRates.filter(r => r.rate > 0) : suiRates;
+
+      return (
+        React.createElement("div", { style: { fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", maxWidth: 900, margin: "0 auto", padding: 16 } },
+          React.createElement("h2", { style: { margin: "0 0 4px", fontSize: 20, color: "#1a1a2e" } }, "MS SUI Rate Exchange Formatter"),
+          React.createElement("p", { style: { margin: "0 0 16px", fontSize: 13, color: "#666" } },
+            "Paste GUSTOPAYROLL.RATE.RESPONSE data → get Panda-ready CSVs"
+          ),
+
+          /* Tab Bar */
+          React.createElement("div", { style: { display: "flex", gap: 0, borderBottom: "2px solid #e0e0e0", marginBottom: 16 } },
+            [
+              { id: TABS.PASTE, label: "1. Paste Data" },
+              { id: TABS.SUI_RATES, label: `2. SUI Rates${suiRates.length ? ` (${displayRates.length})` : ""}` },
+              { id: TABS.EIN_CORRECTIONS, label: `3. EIN Corrections${einCorrections.length ? ` (${einCorrections.length})` : ""}` },
+            ].map(tab =>
+              React.createElement("button", {
+                key: tab.id,
+                onClick: () => setActiveTab(tab.id),
+                style: {
+                  padding: "8px 16px",
+                  border: "none",
+                  borderBottom: activeTab === tab.id ? "2px solid #3b82f6" : "2px solid transparent",
+                  background: "none",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: activeTab === tab.id ? 600 : 400,
+                  color: activeTab === tab.id ? "#3b82f6" : "#666",
+                  marginBottom: -2,
+                }
+              }, tab.label)
+            )
+          ),
+
+          /* Tab: Paste Data */
+          activeTab === TABS.PASTE && React.createElement("div", null,
+            React.createElement("textarea", {
+              value: rawInput,
+              onChange: e => setRawInput(e.target.value),
+              placeholder: "Paste the contents of GUSTOPAYROLL.RATE.RESPONSE.txt here...",
+              style: {
+                width: "100%",
+                height: 300,
+                fontFamily: "monospace",
+                fontSize: 11,
+                padding: 10,
+                border: "1px solid #d0d0d0",
+                borderRadius: 6,
+                resize: "vertical",
+                boxSizing: "border-box",
+                background: "#fafafa",
+                color: "#1a1a2e",
+              }
+            }),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginTop: 10 } },
+              React.createElement("button", {
+                onClick: processData,
+                disabled: !rawInput.trim(),
+                style: {
+                  padding: "8px 24px",
+                  background: rawInput.trim() ? "#3b82f6" : "#ccc",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 6,
+                  cursor: rawInput.trim() ? "pointer" : "default",
+                  fontWeight: 600,
+                  fontSize: 14,
+                }
+              }, "Process Data"),
+              rawInput.trim() && React.createElement("span", { style: { fontSize: 12, color: "#888" } },
+                `${rawInput.split("\n").filter(l => l.trim()).length} lines detected`
+              )
+            )
+          ),
+
+          /* Stats Banner */
+          stats && activeTab !== TABS.PASTE && React.createElement("div", {
+            style: {
+              display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 16, padding: 12,
+              background: "#f0f7ff", borderRadius: 8, border: "1px solid #d0e0f0"
+            }
+          },
+            React.createElement(Stat, { label: "Total Records", value: stats.totalLines }),
+            React.createElement(Stat, { label: "With Rate", value: stats.withRate, color: "#16a34a" }),
+            React.createElement(Stat, { label: "Zero/No Rate", value: stats.withoutRate, color: "#dc2626" }),
+            React.createElement(Stat, { label: "EIN Corrections", value: stats.einCorrectionCount, color: "#2563eb" }),
+            stats.removedDups > 0 && React.createElement(Stat, { label: "Dup FEINs Removed", value: stats.removedDups, color: "#d97706" })
+          ),
+
+          /* Tab: SUI Rates */
+          activeTab === TABS.SUI_RATES && suiRates.length > 0 && React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } },
+              React.createElement("label", { style: { fontSize: 13, display: "flex", alignItems: "center", gap: 6 } },
+                React.createElement("input", { type: "checkbox", checked: filterZero, onChange: e => setFilterZero(e.target.checked) }),
+                "Filter out 0% rates (recommended)"
+              ),
+              React.createElement("div", { style: { display: "flex", gap: 8 } },
+                React.createElement(ActionBtn, { label: copied === "sui" ? "Copied!" : "Copy CSV", onClick: () => copyToClipboard("sui"), active: copied === "sui" }),
+                React.createElement(ActionBtn, { label: "Download CSV", onClick: () => downloadCSV("sui") })
+              )
+            ),
+            React.createElement("div", { style: { maxHeight: 400, overflow: "auto", border: "1px solid #e0e0e0", borderRadius: 6 } },
+              React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "monospace" } },
+                React.createElement("thead", null,
+                  React.createElement("tr", { style: { background: "#f5f5f5", position: "sticky", top: 0 } },
+                    React.createElement("th", { style: thStyle }, "#"),
+                    React.createElement("th", { style: thStyle }, "FEIN"),
+                    React.createElement("th", { style: thStyle }, "SUI Rate")
+                  )
+                ),
+                React.createElement("tbody", null,
+                  displayRates.map((r, i) =>
+                    React.createElement("tr", { key: i, style: { borderBottom: "1px solid #eee" } },
+                      React.createElement("td", { style: tdStyle }, i + 1),
+                      React.createElement("td", { style: tdStyle }, r.fein),
+                      React.createElement("td", { style: tdStyle }, r.rate)
+                    )
+                  )
+                )
+              )
+            )
+          ),
+
+          /* Tab: EIN Corrections */
+          activeTab === TABS.EIN_CORRECTIONS && einCorrections.length > 0 && React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } },
+              React.createElement("span", { style: { fontSize: 13, color: "#666" } },
+                "Deduped, 0000000000 EANs removed, multi-EIN FEINs excluded"
+              ),
+              React.createElement("div", { style: { display: "flex", gap: 8 } },
+                React.createElement(ActionBtn, { label: copied === "ein" ? "Copied!" : "Copy CSV", onClick: () => copyToClipboard("ein"), active: copied === "ein" }),
+                React.createElement(ActionBtn, { label: "Download CSV", onClick: () => downloadCSV("ein") })
+              )
+            ),
+            React.createElement("div", { style: { maxHeight: 400, overflow: "auto", border: "1px solid #e0e0e0", borderRadius: 6 } },
+              React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "monospace" } },
+                React.createElement("thead", null,
+                  React.createElement("tr", { style: { background: "#f5f5f5", position: "sticky", top: 0 } },
+                    React.createElement("th", { style: thStyle }, "#"),
+                    React.createElement("th", { style: thStyle }, "FEIN"),
+                    React.createElement("th", { style: thStyle }, "EIN Key"),
+                    React.createElement("th", { style: thStyle }, "EIN")
+                  )
+                ),
+                React.createElement("tbody", null,
+                  einCorrections.map((r, i) =>
+                    React.createElement("tr", { key: i, style: { borderBottom: "1px solid #eee" } },
+                      React.createElement("td", { style: tdStyle }, i + 1),
+                      React.createElement("td", { style: tdStyle }, r.fein),
+                      React.createElement("td", { style: tdStyle }, r.einKey),
+                      React.createElement("td", { style: tdStyle }, r.ein)
+                    )
+                  )
+                )
+              )
+            )
+          ),
+
+          /* Empty state */
+          activeTab !== TABS.PASTE && !stats && React.createElement("p", {
+            style: { textAlign: "center", color: "#999", padding: 40 }
+          }, 'Paste response data in the first tab and click "Process Data" to get started.')
+        )
+      );
+    }
+
+    const thStyle = { textAlign: "left", padding: "6px 10px", borderBottom: "2px solid #ddd", fontSize: 11, color: "#555" };
+    const tdStyle = { padding: "5px 10px" };
+
+    function Stat({ label, value, color = "#333" }) {
+      return React.createElement("div", { style: { minWidth: 100 } },
+        React.createElement("div", { style: { fontSize: 11, color: "#888" } }, label),
+        React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color } }, value)
+      );
+    }
+
+    function ActionBtn({ label, onClick, active }) {
+      return React.createElement("button", {
+        onClick,
+        style: {
+          padding: "5px 14px",
+          background: active ? "#16a34a" : "#fff",
+          color: active ? "#fff" : "#333",
+          border: "1px solid #d0d0d0",
+          borderRadius: 5,
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 500,
+        }
+      }, label);
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(MSSUIFormatter));
+  </script>
+</body>
+</html>
